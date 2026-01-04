@@ -3,6 +3,7 @@
 #include "server/admin/shell.h"
 #include "core/packman.h"
 // #include "server/rpc-lua/rpc-lua.h"
+#include "server/commands-common/common.h"
 #include "server/server.h"
 #include "server/user/serverplayer.h"
 #include "server/user/user_manager.h"
@@ -99,8 +100,8 @@ void Shell::start() {
 }
 
 void Shell::lspCommand(StringList &) {
-  auto &user_manager = Server::instance().user_manager();
-  auto &players = user_manager.getPlayers();
+  auto &players = commandListPlayers().players;
+
   if (players.size() == 0) {
     spdlog::info("No online player.");
     return;
