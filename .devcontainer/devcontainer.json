@@ -1,0 +1,14 @@
+{
+  "name": "Alpine Linux",
+  "build": {
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools" // Example: C/C++ extension
+      ]
+    }
+  },
+  "remoteUser": "root"
+}
