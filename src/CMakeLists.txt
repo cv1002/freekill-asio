@@ -34,6 +34,8 @@ set(freekill_SRCS
   "server/gamelogic/rpc-dispatchers.cpp"
 
   "server/admin/shell.cpp"
+  "server/admin/admin_service.cpp"
+  "server/admin/admin_http.cpp"
 )
 
 target_precompile_headers(freekill-asio PRIVATE pch.h)

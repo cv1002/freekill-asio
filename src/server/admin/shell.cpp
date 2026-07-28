@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
 #include "server/admin/shell.h"
+#include "server/admin/admin_service.h"
 #include "core/packman.h"
 // #include "server/rpc-lua/rpc-lua.h"
 #include "server/server.h"
@@ -13,6 +14,8 @@
 #include "server/gamelogic/roomthread.h"
 #include "core/util.h"
 #include "core/c-wrapper.h"
+
+#include <nlohmann/json.hpp>
 
 #include <readline/history.h>
 #include <readline/readline.h>
@@ -114,56 +117,53 @@ void Shell::lspCommand(StringList &) {
 }
 
 void Shell::lsrCommand(StringList &list) {
-  auto &user_manager = Server::instance().user_manager();
-  auto &room_manager = Server::instance().room_manager();
+  int roomId = -1;
   if (!list.empty() && !list[0].empty()) {
-    auto pid = list[0];
-    int id = std::atoi(pid.c_str());
+    roomId = std::atoi(list[0].c_str());
+  }
 
-    auto room = room_manager.findRoom(id).lock();
-    if (!room) {
-      if (id != 0) {
-        spdlog::info("No such room.");
-      } else {
-        spdlog::info("You are viewing lobby, players in lobby are:");
+  auto result = AdminService::lsRoomInfo(roomId);
 
-        auto lobby = room_manager.lobby().lock();
-        for (auto &[pid, _] : lobby->getPlayers()) {
-          auto p = user_manager.findPlayerByConnId(pid).lock();
-          if (!p) continue;
-          spdlog::info("{} {{id:{}, connId:{}, state:{}}}",
-                       p->getScreenName(), p->getId(),
-                       p->getConnId(), p->getStateString());
-        }
-      }
-    } else {
-      auto pw = room->getPassword();
-      spdlog::info("{}, {} {{mode:{}, running={}, pw:{}}}", room->getId(), room->getName(),
-        room->getGameMode(), room->isStarted(), pw == "" ? "<nil>" : pw);
-      spdlog::info("Players in this room:");
+  if (!result.ok()) {
+    spdlog::info(result.errorMsg());
+    return;
+  }
 
-      for (auto pid : room->getPlayers()) {
-        auto p = user_manager.findPlayerByConnId(pid).lock();
-        if (!p) continue;
-        spdlog::info("{} {{id:{}, connId:{}, state:{}}}",
-                     p->getScreenName(), p->getId(),
-                     p->getConnId(), p->getStateString());
-      }
+  auto &data = result.data();
+
+  if (data.is_array()) {
+    if (data.empty()) {
+      spdlog::info("No running room.");
+      return;
     }
-
-    return;
-  }
-
-  const auto &rooms = room_manager.getRooms();
-  if (rooms.size() == 0) {
-    spdlog::info("No running room.");
-    return;
-  }
-  spdlog::info("Current {} running rooms are:", rooms.size());
-  for (auto &[_, room] : rooms) {
-    auto pw = room->getPassword();
-    spdlog::info("{}, {} {{mode:{}, running={}, pw:{}}}", room->getId(), room->getName(),
-                 room->getGameMode(), room->isStarted(), pw == "" ? "<nil>" : pw);
+    spdlog::info("Current {} running rooms are:", data.size());
+    for (auto &r : data) {
+      auto password = r["password"];
+      auto pwStr = password.is_null() ? "<nil>" : password.get<std::string>();
+      spdlog::info("{}, {} {{mode:{}, running={}, pw:{}}}",
+        r["id"].get<int>(), r["name"].get<std::string>(),
+        r["mode"].get<std::string>(), r["started"].get<bool>(), pwStr);
+    }
+  } else if (data.contains("lobby")) {
+    spdlog::info("You are viewing lobby, players in lobby are:");
+    for (auto &p : data["players"]) {
+      spdlog::info("{} {{id:{}, connId:{}, state:{}}}",
+        p["screenName"].get<std::string>(), p["id"].get<int>(),
+        p["connId"].get<int>(), p["state"].get<std::string>());
+    }
+  } else if (data.contains("room")) {
+    auto &r = data["room"];
+    auto password = r["password"];
+    auto pwStr = password.is_null() ? "<nil>" : password.get<std::string>();
+    spdlog::info("{}, {} {{mode:{}, running={}, pw:{}}}",
+      r["id"].get<int>(), r["name"].get<std::string>(),
+      r["mode"].get<std::string>(), r["started"].get<bool>(), pwStr);
+    spdlog::info("Players in this room:");
+    for (auto &p : data["players"]) {
+      spdlog::info("{} {{id:{}, connId:{}, state:{}}}",
+        p["screenName"].get<std::string>(), p["id"].get<int>(),
+        p["connId"].get<int>(), p["state"].get<std::string>());
+    }
   }
 }
 

@@ -792,7 +792,7 @@ void Room::quitRoom(ServerPlayer &player, const Packet &) {
 
 void Room::addRobotRequest(ServerPlayer &player, const Packet &) {
   auto &conf = Server::instance().config();
-  if (find(conf.disabledFeatures, "AddRobot") == conf.disabledFeatures.end())
+  if (find(conf.disabledFeatures, std::string_view("AddRobot")) == conf.disabledFeatures.end())
     addRobot(player);
 }
 

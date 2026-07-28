@@ -16,6 +16,7 @@
 #include "server/task/task.h"
 
 #include "server/admin/shell.h"
+#include "server/admin/admin_http.h"
 
 #include "server/io/dbthread.hpp"
 
@@ -106,12 +107,12 @@ void Server::listen(io_context &io_ctx, tcp::endpoint end, udp::endpoint uend) {
   m_shell = std::make_unique<Shell>();
   m_shell->start();
 
+  m_admin_http = std::make_unique<AdminHttpServer>(tcp::endpoint{tcp::v4(), 9000});
+  m_admin_http->start();
+
   auto gamedb = std::make_unique<Sqlite3>("./server/game.db", "./server/gamedb_init.sql");  // 初始化
   this->gamedb = std::make_unique<DbThread>(*main_io_ctx, std::move(gamedb));
   this->gamedb->start();
-
-  // FIXME 此处仅供测试用
-  // (new HttpListener(tcp::endpoint { tcp::v6(), 9000 }))->start();
 }
 
 void Server::stop() {
@@ -252,11 +253,11 @@ void ServerConfig::loadConf(const char* jsonStr) {
 
   // 兼容一下之前的配置信息
   if (root.value("enableBots", true) == false &&
-    std::ranges::find(disabledFeatures, "AddRobot") == disabledFeatures.end())
+    std::ranges::find(disabledFeatures, std::string_view("AddRobot")) == disabledFeatures.end())
     disabledFeatures.push_back("AddRobot");
 
   if (root.value("enableChangeRoom", true) == false &&
-    std::ranges::find(disabledFeatures, "ChangeRoom") == disabledFeatures.end())
+    std::ranges::find(disabledFeatures, std::string_view("ChangeRoom")) == disabledFeatures.end())
     disabledFeatures.push_back("ChangeRoom");
 }
 
