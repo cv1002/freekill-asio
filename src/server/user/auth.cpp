@@ -403,11 +403,14 @@ std::map<std::string, std::string> AuthManager::checkPassword() {
 
   {
     char buf[4096] = {0};
-    RSA_private_decrypt(
+    int decrypted_len = RSA_private_decrypt(
       RSA_size(p_ptr->rsa), (const u_char *)p_ptr->password.data(),
       (u_char *)buf, p_ptr->rsa, RSA_PKCS1_PADDING
     );
-    decrypted_pw = std::string { buf };
+    // 必须按返回长度构造：前 32 字节是随机前缀，可能含 '\0'
+    if (decrypted_len > 0) {
+      decrypted_pw = std::string { buf, static_cast<size_t>(decrypted_len) };
+    }
   }
 
   if (decrypted_pw.size() > 32) {

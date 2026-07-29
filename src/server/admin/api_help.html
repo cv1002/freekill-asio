@@ -3,79 +3,61 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>FreeKill Admin API</title>
+<title>FreeKill 管理 API</title>
 <style>
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 800px; margin: 40px auto; padding: 0 20px; color: #333; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; max-width: 860px; margin: 40px auto; padding: 0 20px; color: #333; }
 h1 { color: #1a1a1a; border-bottom: 2px solid #e0e0e0; padding-bottom: 8px; }
-.endpoint { margin: 24px 0; }
+h2 { margin-top: 32px; font-size: 18px; }
+.endpoint { margin: 16px 0; }
 .endpoint code { background: #f4f4f4; padding: 2px 8px; border-radius: 3px; font-size: 14px; }
 .method { display: inline-block; min-width: 48px; padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: bold; text-align: center; margin-right: 8px; }
 .get { background: #61affe; color: #fff; }
-pre { background: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 4px; padding: 16px; overflow-x: auto; }
-pre code { background: none; padding: 0; }
-table { border-collapse: collapse; width: 100%; margin: 8px 0; }
-th, td { border: 1px solid #e0e0e0; padding: 6px 12px; text-align: left; font-size: 14px; }
-th { background: #f8f8f8; }
+.post { background: #49cc90; color: #fff; }
+.note { background: #fff8e6; border: 1px solid #ffe2a8; padding: 12px 16px; border-radius: 4px; margin: 16px 0; }
+pre { background: #f8f8f8; border: 1px solid #e0e0e0; border-radius: 4px; padding: 12px; overflow-x: auto; font-size: 13px; }
 </style>
 </head>
 <body>
 
-<h1>FreeKill Admin API</h1>
+<h1>FreeKill 管理 API</h1>
 
-<div class="endpoint">
-<span class="method get">GET</span> <code>/api</code>
-<p>Display this help page.</p>
+<div class="note">
+<strong>鉴权：</strong>所有接口需 <code>Authorization: Bearer &lt;token&gt;</code>，
+对应配置 <code>adminHttp.token</code>。写操作 body 为 JSON。
 </div>
 
-<div class="endpoint">
-<span class="method get">GET</span> <code>/api/lsroom</code>
-<span class="method get">GET</span> <code>/api/lsroom?id=&lt;roomId&gt;</code>
-<p>List all rooms, or show detail of a specific room (0 = lobby).</p>
+<h2>只读</h2>
+<div class="endpoint"><span class="method get">GET</span> <code>/api</code> — 本帮助页</div>
+<div class="endpoint"><span class="method get">GET</span> <code>/api/players</code> — 在线玩家（Shell: lsplayer）</div>
+<div class="endpoint"><span class="method get">GET</span> <code>/api/rooms</code> — 房间列表（Shell: lsroom）</div>
+<div class="endpoint"><span class="method get">GET</span> <code>/api/rooms/{id}</code> — 房间详情，id=0 为大厅</div>
+<div class="endpoint"><span class="method get">GET</span> <code>/api/server/stat</code> — 状态（Shell: stat）</div>
 
-<p><strong>Parameters</strong></p>
-<table>
-<tr><th>Param</th><th>Type</th><th>Description</th></tr>
-<tr><td><code>id</code></td><td>integer</td><td>Optional. Room ID. Omit to list all rooms, 0 for lobby.</td></tr>
-</table>
+<h2>干预</h2>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/players/kick</code> — <code>{"name":"..."}</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/broadcast</code> — <code>{"message":"..."}</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/rooms/{id}/broadcast</code> — <code>{"message":"..."}</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/rooms/{id}/kill</code> — 踢光并废弃房间</div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/lobby/check</code> — 清理大厅死连接</div>
 
-<p><strong>Response</strong> (list all rooms)</p>
-<pre><code>{
-  "success": true,
-  "data": [
-    {
-      "id": 10,
-      "name": "Room A",
-      "mode": "aaa",
-      "started": false,
-      "password": null,
-      "playerCount": 3
-    }
-  ]
-}</code></pre>
+<h2>账号</h2>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/ban</code> — <code>{"names":["a"]}</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/unban</code> — 连带 unban UUID</div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/ban-ip</code> / <code>unban-ip</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/ban-uuid</code> / <code>unban-uuid</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/temp-ban</code> — <code>{"name":"a","duration":"7d"}</code>（m/h/d/mo）</div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/temp-mute</code> / <code>unmute</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/whitelist</code> — <code>{"action":"add"|"rm","names":[...]}</code></div>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/accounts/reset-password</code> — 重置为 1234</div>
 
-<p><strong>Response</strong> (room detail, id&nbsp;&gt;&nbsp;0)</p>
-<pre><code>{
-  "success": true,
-  "data": {
-    "room": { "id": 10, "name": "Room A", ... },
-    "players": [
-      { "screenName": "Alice", "id": 1, "connId": 100, "state": "Online" }
-    ]
-  }
-}</code></pre>
+<h2>配置</h2>
+<div class="endpoint"><span class="method post">POST</span> <code>/api/server/reload-config</code></div>
 
-<p><strong>Response</strong> (lobby, id&nbsp;=&nbsp;0)</p>
-<pre><code>{
-  "success": true,
-  "data": { "players": [...] }
-}</code></pre>
-
-<p><strong>Error</strong></p>
+<p><strong>错误格式</strong></p>
 <pre><code>{
   "success": false,
-  "error": "No such room."
+  "error": { "code": "NOT_FOUND", "message": "..." }
 }</code></pre>
-</div>
 
 </body>
 </html>

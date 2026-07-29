@@ -1,5 +1,5 @@
 {
-  "banwords": [],
+  "banWords": [],
   "description": "FreeKill Server",
   "iconUrl": "default",
   "capacity": 100,
@@ -11,5 +11,14 @@
   ],
   "enableWhitelist": false,
   "roomCountPerThread": 2000,
-  "maxPlayersPerDevice": 50
+  "maxPlayersPerDevice": 50,
+  "adminHttp": {
+    "enabled": true,
+    "bind": "127.0.0.1",
+    "port": 9000,
+    "token": "change-me",
+    "corsOrigins": [],
+    "exposeRoomPassword": false,
+    "allowShutdown": false
+  }
 }

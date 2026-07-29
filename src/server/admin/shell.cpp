@@ -30,6 +30,12 @@ namespace asio = boost::asio;
 
 static constexpr const char *prompt = "fk-asio> ";
 
+// Shell 线程调写方法也派发到主 io_context 等待，避免跨线程碰游戏状态
+static AdminResult runOnMain(std::function<AdminResult()> fn) {
+  return asio::dispatch(Server::instance().context(),
+                        asio::use_future(std::move(fn))).get();
+}
+
 void Shell::helpCommand(StringList &) {
   spdlog::info("Frequently used commands:");
 #define HELP_MSG(a, b)                                                         \
@@ -102,17 +108,24 @@ void Shell::start() {
 }
 
 void Shell::lspCommand(StringList &) {
-  auto &user_manager = Server::instance().user_manager();
-  auto &players = user_manager.getPlayers();
-  if (players.size() == 0) {
+  auto result = AdminService::lsPlayers();
+  if (!result.ok()) {
+    spdlog::info(result.errorMsg());
+    return;
+  }
+
+  auto &players = result.data()["players"];
+  if (players.empty()) {
     spdlog::info("No online player.");
     return;
   }
   spdlog::info("Current {} online player(s) are:", players.size());
-  for (auto &[_, player] : players) {
+  for (auto &player : players) {
     spdlog::info("{} {{id:{}, connId:{}, state:{}}}",
-                 player->getScreenName(), player->getId(),
-                 player->getConnId(), player->getStateString());
+                 player["screenName"].get<std::string>(),
+                 player["id"].get<int>(),
+                 player["connId"].get<int>(),
+                 player["state"].get<std::string>());
   }
 }
 
@@ -172,10 +185,8 @@ void Shell::installCommand(StringList &list) {
     spdlog::warn("The 'install' command need a URL to install.");
     return;
   }
-
-  auto url = list[0];
-  PackMan::instance().downloadNewPack(url.c_str());
-  Server::instance().refreshMd5();
+  auto result = AdminService::installPackage(list[0]);
+  if (!result.ok()) spdlog::warn(result.errorMsg());
 }
 
 void Shell::removeCommand(StringList &list) {
@@ -183,25 +194,13 @@ void Shell::removeCommand(StringList &list) {
     spdlog::warn("The 'remove' command need a package name to remove.");
     return;
   }
-
-  auto pack = list[0];
-  PackMan::instance().removePack(pack.c_str());
-  Server::instance().refreshMd5();
+  auto result = AdminService::removePackage(list[0]);
+  if (!result.ok()) spdlog::warn(result.errorMsg());
 }
 
 void Shell::upgradeCommand(StringList &list) {
-  if (list.empty()) {
-    auto arr = PackMan::instance().listPackages();
-    for (auto &a : arr) {
-      PackMan::instance().upgradePack(a["name"].c_str());
-    }
-    Server::instance().refreshMd5();
-    return;
-  }
-
-  auto pack = list[0];
-  PackMan::instance().upgradePack(pack.c_str());
-  Server::instance().refreshMd5();
+  auto result = AdminService::upgradePackage(list.empty() ? "" : list[0]);
+  if (!result.ok()) spdlog::warn(result.errorMsg());
 }
 
 void Shell::enableCommand(StringList &list) {
@@ -209,10 +208,8 @@ void Shell::enableCommand(StringList &list) {
     spdlog::warn("The 'enable' command need a package name to enable.");
     return;
   }
-
-  auto pack = list[0];
-  PackMan::instance().enablePack(pack.c_str());
-  Server::instance().refreshMd5();
+  auto result = AdminService::enablePackage(list[0]);
+  if (!result.ok()) spdlog::warn(result.errorMsg());
 }
 
 void Shell::disableCommand(StringList &list) {
@@ -220,25 +217,32 @@ void Shell::disableCommand(StringList &list) {
     spdlog::warn("The 'disable' command need a package name to disable.");
     return;
   }
-
-  auto pack = list[0];
-  PackMan::instance().disablePack(pack.c_str());
-  Server::instance().refreshMd5();
+  auto result = AdminService::disablePackage(list[0]);
+  if (!result.ok()) spdlog::warn(result.errorMsg());
 }
 
 void Shell::lspkgCommand(StringList &) {
-  auto arr = PackMan::instance().listPackages();
+  auto result = AdminService::listPackages();
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
+    return;
+  }
   spdlog::info("Name\tVersion\t\tEnabled");
   spdlog::info("------------------------------");
-  for (auto &a : arr) {
-    auto hash = a["hash"];
-    spdlog::info("{}\t{}\t{}", a["name"], hash.substr(0, 8), a["enabled"]);
+  for (auto &a : result.data()["packages"]) {
+    auto hash = a["hash"].get<std::string>();
+    spdlog::info("{}\t{}\t{}", a["name"].get<std::string>(),
+                 hash.substr(0, std::min<size_t>(8, hash.size())),
+                 a["enabled"].get<bool>());
   }
 }
 
 void Shell::syncpkgCommand(StringList &) {
-  PackMan::instance().syncCommitHashToDatabase();
-  Server::instance().refreshMd5();
+  auto result = AdminService::syncPackages();
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
+    return;
+  }
   spdlog::info("Done.");
 }
 
@@ -249,15 +253,10 @@ void Shell::kickCommand(StringList &list) {
   }
 
   auto playerName = list[0];
-
-  const auto &players = Server::instance().user_manager().getPlayers();
-  for (const auto &[_, p]: players) {
-    if (p->getScreenName() == playerName) {
-      p->emitKicked();
-      return;
-    }
+  auto result = runOnMain([&] { return AdminService::kickPlayer(playerName); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
-  spdlog::warn("Can't find any online player named {}.", playerName);
 }
 
 void Shell::msgCommand(StringList &list) {
@@ -271,7 +270,7 @@ void Shell::msgCommand(StringList &list) {
     msg += s;
     msg += ' ';
   }
-  Server::instance().broadcast("ServerMessage", msg);
+  runOnMain([&] { return AdminService::broadcast(msg); });
 }
 
 void Shell::msgRoomCommand(StringList &list) {
@@ -281,40 +280,14 @@ void Shell::msgRoomCommand(StringList &list) {
   }
 
   auto roomId = atoi(list[0].c_str());
-  auto room = Server::instance().room_manager().findRoom(roomId).lock();
-  if (!room) {
-    spdlog::info("No such room.");
-    return;
-  }
   std::string msg;
   for (size_t i = 1; i < list.size(); i++) {
     msg += list[i];
     msg += ' ';
   }
-  room->doBroadcastNotify(room->getPlayers(), "ServerMessage", msg);
-}
-
-static void banAccount(Sqlite3 &db, const std::string_view &name, bool banned) {
-  if (!Sqlite3::checkString(name))
-    return;
-  static constexpr const char *sql_find =
-    "SELECT id FROM userinfo WHERE name='{}';";
-  auto result = db.select(fmt::format(sql_find, name));
-  if (result.empty())
-    return;
-  auto obj = result[0];
-  int id = atoi(obj["id"].c_str());
-  db.exec(fmt::format("UPDATE userinfo SET banned={} WHERE id={};",
-                  banned ? 1 : 0, id));
-
-  if (banned) {
-    auto p = Server::instance().user_manager().findPlayer(id).lock();
-    if (p) {
-      p->emitKicked();
-    }
-    spdlog::info("Banned {}.", name);
-  } else {
-    spdlog::info("Unbanned {}.", name);
+  auto result = runOnMain([&] { return AdminService::broadcastRoom(roomId, msg); });
+  if (!result.ok()) {
+    spdlog::info(result.errorMsg());
   }
 }
 
@@ -324,10 +297,9 @@ void Shell::banCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-
-  for (auto &name : list) {
-    banAccount(db, name, true);
+  auto result = runOnMain([&] { return AdminService::banAccounts(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -337,40 +309,9 @@ void Shell::unbanCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-
-  for (auto &name : list) {
-    banAccount(db, name, false);
-  }
-
-  // unbanipCommand(list);
-  unbanUuidCommand(list);
-}
-
-static void banIPByName(Sqlite3 &db, const std::string_view &name, bool banned) {
-  if (!Sqlite3::checkString(name))
-    return;
-
-  static constexpr const char *sql_find =
-    "SELECT id, lastLoginIp FROM userinfo WHERE name='{}';";
-  auto result = db.select(fmt::format(sql_find, name));
-  if (result.empty())
-    return;
-  auto obj = result[0];
-  int id = atoi(obj["id"].c_str());
-  auto addr = obj["lastLoginIp"];
-
-  if (banned) {
-    db.exec(fmt::format("INSERT INTO banip VALUES('{}');", addr));
-
-    auto p = Server::instance().user_manager().findPlayer(id).lock();
-    if (p) {
-      p->emitKicked();
-    }
-    spdlog::info("Banned IP {}.", addr);
-  } else {
-    db.exec(fmt::format("DELETE FROM banip WHERE ip='{}';", addr));
-    spdlog::info("Unbanned IP {}.", addr);
+  auto result = runOnMain([&] { return AdminService::unbanAccounts(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -380,10 +321,9 @@ void Shell::banipCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-
-  for (auto &name : list) {
-    banIPByName(db, name, true);
+  auto result = runOnMain([&] { return AdminService::banIpsByNames(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -393,41 +333,9 @@ void Shell::unbanipCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-
-  for (auto &name : list) {
-    banIPByName(db, name, false);
-  }
-}
-
-static void banUuidByName(Sqlite3 &db, const std::string_view &name, bool banned) {
-  if (!Sqlite3::checkString(name))
-    return;
-  static constexpr const char *sql_find =
-    "SELECT id FROM userinfo WHERE name='{}';";
-  auto result = db.select(fmt::format(sql_find, name));
-  if (result.empty())
-    return;
-  auto obj = result[0];
-  int id = atoi(obj["id"].c_str());
-
-  auto result2 = db.select(fmt::format("SELECT * FROM uuidinfo WHERE id={};", id));
-  if (result2.empty())
-    return;
-
-  auto uuid = result2[0]["uuid"];
-
-  if (banned) {
-    db.exec(fmt::format("INSERT INTO banuuid VALUES('{}');", uuid));
-
-    auto p = Server::instance().user_manager().findPlayer(id).lock();
-    if (p) {
-      p->emitKicked();
-    }
-    spdlog::info("Banned UUID {}.", uuid);
-  } else {
-    db.exec(fmt::format("DELETE FROM banuuid WHERE uuid='{}';", uuid));
-    spdlog::info("Unbanned UUID {}.", uuid);
+  auto result = runOnMain([&] { return AdminService::unbanIps(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -437,10 +345,9 @@ void Shell::banUuidCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-
-  for (auto &name : list) {
-    banUuidByName(db, name, true);
+  auto result = runOnMain([&] { return AdminService::banUuidsByNames(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -450,10 +357,9 @@ void Shell::unbanUuidCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-
-  for (auto &name : list) {
-    banUuidByName(db, name, false);
+  auto result = runOnMain([&] { return AdminService::unbanUuids(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -463,71 +369,10 @@ void Shell::tempbanCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-  auto name = list[0];
-  auto duration_str = list[1];
-  static const char *invalid_dur = "Invalid duration value. "
-    "Possible choices: ??m (minute), ??h (hour), ??d (day) and ??mo (month, 30 days).";
-  size_t pos;
-  long value;
-  try {
-    value = std::stol(duration_str, &pos);
-  } catch (const std::exception& e) {
-    spdlog::warn(invalid_dur);
-    return;
+  auto result = runOnMain([&] { return AdminService::tempBan(list[0], list[1]); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
-
-  if (value < 0) {
-    spdlog::warn(invalid_dur);
-    return;
-  }
-
-  using namespace std::chrono;
-  std::string unit = duration_str.substr(pos);
-
-  seconds duration;
-
-  if (unit == "m") {
-    duration = value * 60s;
-  } else if (unit == "h") {
-    duration = value * 3600s;
-  } else if (unit == "d") {
-    duration = value * 86400s;
-  } else if (unit == "mo") {
-    duration = value * 2592000s;
-  } else {
-    spdlog::warn(invalid_dur);
-    return;
-  }
-
-  auto end_tp = system_clock::now() + duration;
-  auto expireTimestamp = duration_cast<seconds>(end_tp.time_since_epoch()).count();
-
-  if (!Sqlite3::checkString(name))
-    return;
-
-  static constexpr const char *sql_find =
-    "SELECT id FROM userinfo WHERE name='{}';";
-  auto result = db.select(fmt::format(sql_find, name));
-  if (result.empty())
-    return;
-
-  auto obj = result[0];
-  int id = atoi(obj["id"].c_str());
-  db.exec(fmt::format("UPDATE userinfo SET banned=1 WHERE id={};", id));
-  db.exec(fmt::format(
-    "REPLACE INTO tempban (uid, expireAt) VALUES ({}, {});", id, expireTimestamp));
-
-  auto p = Server::instance().user_manager().findPlayer(id).lock();
-  if (p) {
-    p->emitKicked();
-  }
-
-  std::time_t now_time_t = system_clock::to_time_t(end_tp);
-  std::tm local_tm = *std::localtime(&now_time_t);
-  spdlog::info("Banned {} until {:04}-{:02}-{:02} {:02}:{:02}:{:02}.", name.c_str(),
-               local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday,
-               local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec);
 }
 
 void Shell::tempmuteCommand(StringList &list) {
@@ -536,67 +381,10 @@ void Shell::tempmuteCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-  auto name = list[0];
-  auto duration_str = list[1];
-  int mute_type = 1; // 1为完全禁言
-
-  static const char *invalid_dur = "Invalid duration value. "
-    "Possible choices: ??m (minute), ??h (hour), ??d (day) and ??mo (month, 30 days).";
-  size_t pos;
-  long value;
-  try {
-    value = std::stol(duration_str, &pos);
-  } catch (const std::exception& e) {
-    spdlog::warn(invalid_dur);
-    return;
+  auto result = runOnMain([&] { return AdminService::tempMute(list[0], list[1]); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
-
-  if (value < 0) {
-    spdlog::warn(invalid_dur);
-    return;
-  }
-
-  using namespace std::chrono;
-  std::string unit = duration_str.substr(pos);
-
-  seconds duration;
-
-  if (unit == "m") {
-    duration = value * 60s;
-  } else if (unit == "h") {
-    duration = value * 3600s;
-  } else if (unit == "d") {
-    duration = value * 86400s;
-  } else if (unit == "mo") {
-    duration = value * 2592000s;
-  } else {
-    spdlog::warn(invalid_dur);
-    return;
-  }
-
-  auto end_tp = system_clock::now() + duration;
-  auto expireTimestamp = duration_cast<seconds>(end_tp.time_since_epoch()).count();
-
-  if (!Sqlite3::checkString(name))
-    return;
-
-  static constexpr const char *sql_find = 
-    "SELECT id FROM userinfo WHERE name='{}';";
-  auto result = db.select(fmt::format(sql_find, name));
-  if (result.empty())
-    return;
-
-  auto obj = result[0];
-  int id = atoi(obj["id"].c_str());
-  db.exec(fmt::format(
-    "REPLACE INTO tempmute (uid, expireAt, type) VALUES ({}, {}, {});", id, expireTimestamp, mute_type));
-
-  std::time_t now_time_t = system_clock::to_time_t(end_tp);
-  std::tm local_tm = *std::localtime(&now_time_t);
-  spdlog::info("Muted {} until {:04}-{:02}-{:02} {:02}:{:02}:{:02}.", name.c_str(),
-              local_tm.tm_year + 1900, local_tm.tm_mon + 1, local_tm.tm_mday,
-              local_tm.tm_hour, local_tm.tm_min, local_tm.tm_sec);
 }
 
 void Shell::unmuteCommand(StringList &list) {
@@ -604,24 +392,10 @@ void Shell::unmuteCommand(StringList &list) {
     spdlog::warn("The 'unmute' command needs at least 1 <name>.");
     return;
   }
-  auto &db = Server::instance().database();
 
-  for (auto &name : list) {
-    if (!Sqlite3::checkString(name))
-      continue;
-
-    static constexpr const char *sql_find = 
-      "SELECT id FROM userinfo WHERE name='{}';";
-    auto result = db.select(fmt::format(sql_find, name));
-    if (result.empty()) {
-      spdlog::info("Player {} not found.", name.c_str());
-      continue;
-    }
-
-    auto obj = result[0];
-    int id = atoi(obj["id"].c_str());
-    db.exec(fmt::format("DELETE FROM tempmute WHERE uid={};", id));
-    spdlog::info("Unmuted player {}.", name.c_str());
+  auto result = runOnMain([&] { return AdminService::unmute(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
@@ -632,38 +406,18 @@ void Shell::whitelistCommand(StringList &list) {
   }
 
   auto op = list[0];
-  auto &server = Server::instance();
-  auto &db = server.database();
-
-  if (op == "add") {
-    server.beginTransaction();
-    for (size_t i = 1; i < list.size(); i++) {
-      auto &name = list[i];
-      if (!Sqlite3::checkString(name))
-        continue;
-
-      db.exec(fmt::format("INSERT INTO whitelist VALUES ('{}');", name));
-    }
-    server.endTransaction();
-  } else if (op == "rm") {
-    server.beginTransaction();
-    for (size_t i = 1; i < list.size(); i++) {
-      auto &name = list[i];
-      if (!Sqlite3::checkString(name))
-        continue;
-
-      db.exec(fmt::format("DELETE FROM whitelist WHERE name='{}';", name));
-    }
-    server.endTransaction();
-  } else {
-    spdlog::warn("usage: whitelist add/rm <names>...");
-    return;
+  StringList names(list.begin() + 1, list.end());
+  auto result = runOnMain([&] { return AdminService::whitelist(op, names); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
 }
 
 void Shell::reloadConfCommand(StringList &) {
-  Server::instance().reloadConfig();
-  spdlog::info("Reloaded server config file.");
+  auto result = runOnMain([] { return AdminService::reloadConfig(); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
+  }
 }
 
 void Shell::resetPasswordCommand(StringList &list) {
@@ -672,66 +426,33 @@ void Shell::resetPasswordCommand(StringList &list) {
     return;
   }
 
-  auto &db = Server::instance().database();
-  for (auto &name : list) {
-    // 重置为1234
-    db.exec(fmt::format("UPDATE userinfo SET password="
-          "'dbdc2ad3d9625407f55674a00b58904242545bfafedac67485ac398508403ade',"
-          "salt='00000000' WHERE name='{}';", name));
+  auto result = runOnMain([&] { return AdminService::resetPassword(list); });
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
   }
-}
-
-static std::string formatMsDuration(int64_t time) {
-  std::string ret;
-  ret.reserve(32);
-
-  auto ms = time % 1000;
-  time /= 1000;
-  auto sec = time % 60;
-  ret = fmt::format("{}.{} seconds", sec, ms) + ret;
-  time /= 60;
-  if (time == 0) return ret;
-
-  auto min = time % 60;
-  ret = fmt::format("{} minutes, ", min) + ret;
-  time /= 60;
-  if (time == 0) return ret;
-
-  auto hour = time % 24;
-  ret = fmt::format("{} hours, ", hour) + ret;
-  time /= 24;
-  if (time == 0) return ret;
-
-  ret = fmt::format("{} days, ", time) + ret;
-  return ret;
 }
 
 void Shell::statCommand(StringList &) {
-  auto &server = Server::instance();
-  auto uptime_ms = server.getUptime();
-  spdlog::info("uptime: {}", formatMsDuration(uptime_ms));
+  auto result = AdminService::serverStat();
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
+    return;
+  }
 
-  auto players = server.user_manager().getPlayers();
-  spdlog::info("Player(s) logged in: {}", players.size());
-  // spdlog::info("Rooms: {}", server.room_manager().getRooms().size());
+  auto &data = result.data();
+  spdlog::info("uptime: {}", data["uptime"].get<std::string>());
+  spdlog::info("Player(s) logged in: {}", data["playerCount"].get<int>());
 
-  auto &threads = server.getThreads();
-  for (auto &[id, thr] : threads) {
-    auto roomsCount = thr->getRefCount();
-    auto &L = thr->getLua();
-
-    auto stat_str = L.getConnectionInfo();
-    auto outdated = thr->isOutdated();
-    if (roomsCount == 0 && outdated) {
-      server.removeThread(thr->id());
-    } else {
-      spdlog::info("RoomThread {} | {} | {} room(s) {}", id, stat_str, roomsCount,
-            outdated ? "| Outdated" : "");
-    }
+  for (auto &thr : data["threads"]) {
+    spdlog::info("RoomThread {} | {} | {} room(s) {}",
+                 thr["id"].get<int>(),
+                 thr["connection"].get<std::string>(),
+                 thr["roomCount"].get<int>(),
+                 thr["outdated"].get<bool>() ? "| Outdated" : "");
   }
 
   spdlog::info("Database memory usage: {:.2f} MiB",
-        ((double)server.database().getMemUsage()) / 1048576);
+               data["databaseMemoryMiB"].get<double>());
 }
 
 void Shell::killRoomCommand(StringList &list) {
@@ -739,31 +460,14 @@ void Shell::killRoomCommand(StringList &list) {
     spdlog::warn("Need room id to do this.");
     return;
   }
-
-  auto pid = list[0];
-  int id = atoi(pid.c_str());
-
-  auto &um = Server::instance().user_manager();
-  auto &rm = Server::instance().room_manager();
-  auto room = rm.findRoom(id).lock();
-  if (!room) {
-    spdlog::info("No such room.");
-  } else {
-    spdlog::info("Killing room {}", id);
-
-    for (auto pConnId : room->getPlayers()) {
-      auto player = um.findPlayerByConnId(pConnId).lock();
-      if (player && player->getId() > 0)
-        player->emitKicked();
-    }
-    room->checkAbandoned(Room::NoHuman);
-  }
+  int id = atoi(list[0].c_str());
+  auto result = runOnMain([id] { return AdminService::killRoom(id); });
+  if (!result.ok()) spdlog::info(result.errorMsg());
 }
 
 void Shell::checkLobbyCommand(StringList &) {
-  auto &server = Server::instance();
-  auto lobby = server.room_manager().lobby().lock();
-  asio::post(Server::instance().context(), [&] { lobby->checkAbandoned(); });
+  auto result = runOnMain([] { return AdminService::checkLobby(); });
+  if (!result.ok()) spdlog::warn(result.errorMsg());
 }
 
 static void sigintHandler(int) {
