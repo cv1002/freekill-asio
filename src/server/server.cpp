@@ -10,7 +10,6 @@
 #include "network/server_socket.h"
 #include "network/client_socket.h"
 #include "network/router.h"
-#include "network/http_listener.h"
 #include "server/gamelogic/roomthread.h"
 #include "server/task/task_manager.h"
 #include "server/task/task.h"
@@ -107,8 +106,28 @@ void Server::listen(io_context &io_ctx, tcp::endpoint end, udp::endpoint uend) {
   m_shell = std::make_unique<Shell>();
   m_shell->start();
 
-  m_admin_http = std::make_unique<AdminHttpServer>(tcp::endpoint{tcp::v4(), 9000});
-  m_admin_http->start();
+  const auto &httpCfg = config().adminHttp;
+  if (httpCfg.enabled && !httpCfg.token.empty()) {
+    if (httpCfg.port < 1 || httpCfg.port > 65535) {
+      spdlog::error("Admin HTTP invalid port {} (expect 1..65535)", httpCfg.port);
+    } else {
+      boost::system::error_code ec;
+      auto addr = asio::ip::make_address(httpCfg.bind, ec);
+      if (ec) {
+        spdlog::error("Admin HTTP invalid bind address '{}': {}", httpCfg.bind, ec.message());
+      } else {
+        if (httpCfg.bind == "0.0.0.0" || httpCfg.bind == "::") {
+          spdlog::warn("Admin HTTP is bound to all interfaces ({}). Prefer 127.0.0.1 behind a reverse proxy + TLS.",
+                       httpCfg.bind);
+        }
+        auto port = static_cast<unsigned short>(httpCfg.port);
+        m_admin_http = std::make_unique<AdminHttpServer>(tcp::endpoint{addr, port}, httpCfg);
+        m_admin_http->start();
+      }
+    }
+  } else {
+    spdlog::info("Admin HTTP disabled (set adminHttp.enabled=true and adminHttp.token to enable)");
+  }
 
   auto gamedb = std::make_unique<Sqlite3>("./server/game.db", "./server/gamedb_init.sql");  // 初始化
   this->gamedb = std::make_unique<DbThread>(*main_io_ctx, std::move(gamedb));
@@ -250,6 +269,23 @@ void ServerConfig::loadConf(const char* jsonStr) {
   roomCountPerThread  = root.value("roomCountPerThread", roomCountPerThread);
   maxPlayersPerDevice = root.value("maxPlayersPerDevice", maxPlayersPerDevice);
   enableWhitelist     = root.value("enableWhitelist", enableWhitelist);
+
+  if (root.contains("adminHttp") && root["adminHttp"].is_object()) {
+    // 管理 HTTP：未 enabled 或 token 为空时不监听
+    const auto &http = root["adminHttp"];
+    adminHttp.enabled = http.value("enabled", adminHttp.enabled);
+    adminHttp.bind = http.value("bind", adminHttp.bind);
+    adminHttp.port = http.value("port", adminHttp.port);
+    adminHttp.token = http.value("token", adminHttp.token);
+    adminHttp.exposeRoomPassword = http.value("exposeRoomPassword", adminHttp.exposeRoomPassword);
+    adminHttp.allowShutdown = http.value("allowShutdown", adminHttp.allowShutdown);
+    if (http.contains("corsOrigins") && http["corsOrigins"].is_array()) {
+      adminHttp.corsOrigins.clear();
+      for (auto &v : http["corsOrigins"]) {
+        if (v.is_string()) adminHttp.corsOrigins.push_back(v.get<std::string>());
+      }
+    }
+  }
 
   // 兼容一下之前的配置信息
   if (root.value("enableBots", true) == false &&

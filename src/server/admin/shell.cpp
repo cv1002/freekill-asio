@@ -102,17 +102,24 @@ void Shell::start() {
 }
 
 void Shell::lspCommand(StringList &) {
-  auto &user_manager = Server::instance().user_manager();
-  auto &players = user_manager.getPlayers();
-  if (players.size() == 0) {
+  auto result = AdminService::lsPlayers();
+  if (!result.ok()) {
+    spdlog::info(result.errorMsg());
+    return;
+  }
+
+  auto &players = result.data()["players"];
+  if (players.empty()) {
     spdlog::info("No online player.");
     return;
   }
   spdlog::info("Current {} online player(s) are:", players.size());
-  for (auto &[_, player] : players) {
+  for (auto &player : players) {
     spdlog::info("{} {{id:{}, connId:{}, state:{}}}",
-                 player->getScreenName(), player->getId(),
-                 player->getConnId(), player->getStateString());
+                 player["screenName"].get<std::string>(),
+                 player["id"].get<int>(),
+                 player["connId"].get<int>(),
+                 player["state"].get<std::string>());
   }
 }
 
@@ -227,12 +234,18 @@ void Shell::disableCommand(StringList &list) {
 }
 
 void Shell::lspkgCommand(StringList &) {
-  auto arr = PackMan::instance().listPackages();
+  auto result = AdminService::listPackages();
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
+    return;
+  }
   spdlog::info("Name\tVersion\t\tEnabled");
   spdlog::info("------------------------------");
-  for (auto &a : arr) {
-    auto hash = a["hash"];
-    spdlog::info("{}\t{}\t{}", a["name"], hash.substr(0, 8), a["enabled"]);
+  for (auto &a : result.data()["packages"]) {
+    auto hash = a["hash"].get<std::string>();
+    spdlog::info("{}\t{}\t{}", a["name"].get<std::string>(),
+                 hash.substr(0, std::min<size_t>(8, hash.size())),
+                 a["enabled"].get<bool>());
   }
 }
 
@@ -681,57 +694,27 @@ void Shell::resetPasswordCommand(StringList &list) {
   }
 }
 
-static std::string formatMsDuration(int64_t time) {
-  std::string ret;
-  ret.reserve(32);
-
-  auto ms = time % 1000;
-  time /= 1000;
-  auto sec = time % 60;
-  ret = fmt::format("{}.{} seconds", sec, ms) + ret;
-  time /= 60;
-  if (time == 0) return ret;
-
-  auto min = time % 60;
-  ret = fmt::format("{} minutes, ", min) + ret;
-  time /= 60;
-  if (time == 0) return ret;
-
-  auto hour = time % 24;
-  ret = fmt::format("{} hours, ", hour) + ret;
-  time /= 24;
-  if (time == 0) return ret;
-
-  ret = fmt::format("{} days, ", time) + ret;
-  return ret;
-}
-
 void Shell::statCommand(StringList &) {
-  auto &server = Server::instance();
-  auto uptime_ms = server.getUptime();
-  spdlog::info("uptime: {}", formatMsDuration(uptime_ms));
+  auto result = AdminService::serverStat();
+  if (!result.ok()) {
+    spdlog::warn(result.errorMsg());
+    return;
+  }
 
-  auto players = server.user_manager().getPlayers();
-  spdlog::info("Player(s) logged in: {}", players.size());
-  // spdlog::info("Rooms: {}", server.room_manager().getRooms().size());
+  auto &data = result.data();
+  spdlog::info("uptime: {}", data["uptime"].get<std::string>());
+  spdlog::info("Player(s) logged in: {}", data["playerCount"].get<int>());
 
-  auto &threads = server.getThreads();
-  for (auto &[id, thr] : threads) {
-    auto roomsCount = thr->getRefCount();
-    auto &L = thr->getLua();
-
-    auto stat_str = L.getConnectionInfo();
-    auto outdated = thr->isOutdated();
-    if (roomsCount == 0 && outdated) {
-      server.removeThread(thr->id());
-    } else {
-      spdlog::info("RoomThread {} | {} | {} room(s) {}", id, stat_str, roomsCount,
-            outdated ? "| Outdated" : "");
-    }
+  for (auto &thr : data["threads"]) {
+    spdlog::info("RoomThread {} | {} | {} room(s) {}",
+                 thr["id"].get<int>(),
+                 thr["connection"].get<std::string>(),
+                 thr["roomCount"].get<int>(),
+                 thr["outdated"].get<bool>() ? "| Outdated" : "");
   }
 
   spdlog::info("Database memory usage: {:.2f} MiB",
-        ((double)server.database().getMemUsage()) / 1048576);
+               data["databaseMemoryMiB"].get<double>());
 }
 
 void Shell::killRoomCommand(StringList &list) {

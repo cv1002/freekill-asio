@@ -15,6 +15,16 @@ class AdminHttpServer;
 class Sqlite3;
 class DbThread;
 
+struct AdminHttpConfig {
+  bool enabled = false;                 // 是否启用管理 HTTP
+  std::string bind = "127.0.0.1";       // 监听地址，默认本机
+  int port = 9000;
+  std::string token;                    // Bearer token；为空则不启动
+  std::vector<std::string> corsOrigins; // 非空时按 Origin 白名单回显 CORS
+  bool exposeRoomPassword = false;      // HTTP 响应是否返回房间明文密码
+  bool allowShutdown = false;           // 是否允许通过 HTTP 关服（二期）
+};
+
 struct ServerConfig {
   std::vector<std::string> banWords;
   std::string description = "FreeKill Server (non-Qt)";
@@ -27,6 +37,7 @@ struct ServerConfig {
   bool enableWhitelist = false;
   int roomCountPerThread = 2000;
   int maxPlayersPerDevice = 1000;
+  AdminHttpConfig adminHttp;
 
   void loadConf(const char *json);
 

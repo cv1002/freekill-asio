@@ -55,4 +55,13 @@
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 
+#ifdef __APPLE__
+#include <pthread.h>
+// macOS 仅支持单参数；Linux 为两参数。便于本机编译测试
+inline int fk_pthread_setname_np(pthread_t, const char *name) {
+  return ::pthread_setname_np(name);
+}
+#define pthread_setname_np(thread, name) fk_pthread_setname_np((thread), (name))
+#endif
+
 #define OPENSSL_API_COMPAT 0x10101000L

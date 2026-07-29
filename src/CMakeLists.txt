@@ -11,7 +11,6 @@ set(freekill_SRCS
   "network/server_socket.cpp"
   "network/client_socket.cpp"
   "network/router.cpp"
-  "network/http_listener.cpp"
 
   "server/server.cpp"
 
