@@ -53,4 +53,5 @@ private:
   int checkout_branch(git_repository *repo, const char *branch);
   int status(git_repository *repo); // return 1 if the workdir is modified
   std::string head(git_repository *repo); // get commit hash of HEAD
+  std::string generate_changelog(git_repository *repo, const char *commit_range);
 };
