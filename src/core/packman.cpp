@@ -14,12 +14,12 @@ static std::unique_ptr<PackMan> pacman_instance = nullptr;
 PackMan &PackMan::instance() {
   if (!pacman_instance) {
     pacman_instance = std::unique_ptr<PackMan>(new PackMan);
-  }
 
 #ifdef FK_EMBEDDED
-  // 静态编译版中，需要手动打包certs文件，过老的系统里面的证书不太可靠
-  git_libgit2_opts(GIT_OPT_SET_SSL_CERT_LOCATIONS, NULL, "./certs");
+    // 静态编译版中，需要手动打包certs文件，过老的系统里面的证书不太可靠
+    git_libgit2_opts(GIT_OPT_SET_SSL_CERT_LOCATIONS, NULL, "./certs");
 #endif
+  }
 
   return *pacman_instance;
 }
@@ -71,6 +71,16 @@ void PackMan::refreshSummary() {
   m_summary = std::string(bin.begin(), bin.end());
 }
 
+// RAII wrapper for libgit2 git_repository
+struct PackMan::GitRepo {
+  git_repository *repo = NULL;
+
+  GitRepo() noexcept = default;
+  GitRepo(GitRepo &) = delete;
+  GitRepo(GitRepo &&) = delete;
+  ~GitRepo() { if (repo) git_repository_free(repo); }
+};
+
 
 /*
 void PackMan::loadSummary(const QString &jsonData, bool useThread) {
@@ -119,9 +129,12 @@ int PackMan::downloadNewPack(const char *u) {
   static constexpr const char *sql_update = "INSERT INTO packages (name,url,hash,enabled) \
     VALUES ('{}','{}','{}',1);";
 
-  int err = clone(u);
+  GitRepo raii_repo;
+  int err = clone(u, raii_repo);
   if (err < 0)
     return err;
+
+  auto repo = raii_repo.repo;
 
   auto url = std::string { u };
   while (!url.empty() && url.back() == '/') {
@@ -135,7 +148,7 @@ int PackMan::downloadNewPack(const char *u) {
 
   auto result = db->select(fmt::format(sql_select, fileName));
   if (result.empty()) {
-    db->exec(fmt::format(sql_update, fileName, url, head(fileName.c_str())));
+    db->exec(fmt::format(sql_update, fileName, url, head(repo)));
   }
 
   return err;
@@ -166,38 +179,50 @@ void PackMan::disablePack(const char *pack) {
 }
 
 int PackMan::updatePack(const char *pack, const char *hash) {
-  int err;
-  // 先status 检查dirty 后面全是带--force的操作
-  err = status(pack);
-  if (err != 0)
-    return err;
-  err = pull(pack);
+  GitRepo raii_repo;
+  int err = open(pack, raii_repo);
   if (err < 0)
     return err;
-  err = checkout(pack, hash);
+  auto repo = raii_repo.repo;
+
+  // 先status 检查dirty 后面全是带--force的操作
+  err = status(repo);
+  if (err != 0)
+    return err;
+  err = pull(repo);
+  if (err < 0)
+    return err;
+  err = checkout(repo, hash);
   if (err < 0)
     return err;
   return 0;
 }
 
 int PackMan::upgradePack(const char *pack) {
-  int err;
-  // 先status 检查dirty 后面全是带--force的操作
-  err = status(pack);
-  if (err != 0)
-    return err;
-  err = pull(pack);
+  GitRepo raii_repo;
+  int err = open(pack, raii_repo);
   if (err < 0)
     return err;
+  auto repo = raii_repo.repo;
+
+  // 先status 检查dirty 后面全是带--force的操作
+  err = status(repo);
+  if (err != 0)
+    return err;
+
+  err = pull(repo);
+  if (err < 0)
+    return err;
+
   // 至此upgrade命令把包升到了FETCH_HEAD的commit
   // 我们稍微操作一下，让HEAD指向最新的master
   // 这样以后就能开新分支干活了
-  err = checkout_branch(pack, "master");
+  err = checkout_branch(repo, "master");
   if (err < 0)
     return err;
 
   db->exec(fmt::format("UPDATE packages SET hash = '{}' WHERE name = '{}';",
-                  head(pack), pack));
+                  head(repo), pack));
   return 0;
 }
 
@@ -221,14 +246,22 @@ Sqlite3::QueryResult PackMan::listPackages() {
 }
 
 void PackMan::forceCheckoutMaster(const char *pack) {
-  checkout_branch(pack, "master");
+  GitRepo repo;
+  int err = open(pack, repo);
+  if (err < 0)
+    return;
+  checkout_branch(repo.repo, "master");
 }
 
 void PackMan::syncCommitHashToDatabase() {
   for (auto e : db->select("SELECT name FROM packages;")) {
     auto pack = e["name"];
+    GitRepo repo;
+    int err = open(pack.c_str(), repo);
+    if (err < 0)
+      continue;
     db->exec(fmt::format("UPDATE packages SET hash = '{}' WHERE name = '{}';",
-             head(pack.c_str()), pack));
+             head(repo.repo), pack));
   }
 }
 
@@ -241,6 +274,18 @@ void PackMan::syncCommitHashToDatabase() {
     GIT_FAIL;          \
     goto clean;        \
   }
+
+int PackMan::open(const char *name, GitRepo &repo) {
+  git_repository *raw = NULL;
+  auto path = fmt::format("packages/{}", name);
+  int err = git_repository_open(&raw, path.c_str());
+  if (err < 0) {
+    GIT_FAIL;
+    return err;
+  }
+  repo.repo = raw;
+  return 0;
+}
 
 static int transfer_progress_cb(const git_indexer_progress *stats,
                                 void *payload) {
@@ -256,8 +301,7 @@ static int transfer_progress_cb(const git_indexer_progress *stats,
   return 0;
 }
 
-int PackMan::clone(const char *u) {
-  git_repository *repo = NULL;
+int PackMan::clone(const char *u, GitRepo &repo) {
   auto url = std::string { u };
   while (!url.empty() && url.back() == '/') {
     url.pop_back();
@@ -269,11 +313,12 @@ int PackMan::clone(const char *u) {
   }
   auto clonePath = std::filesystem::path("packages") / fileName;
 
+  git_repository *raw = NULL;
   git_clone_options opt;
   git_clone_init_options(&opt, GIT_CLONE_OPTIONS_VERSION);
   opt.fetch_opts.proxy_opts.version = 1;
   opt.fetch_opts.callbacks.transfer_progress = transfer_progress_cb;
-  int err = git_clone(&repo, url.c_str(), clonePath.string().c_str(), &opt);
+  int err = git_clone(&raw, url.c_str(), clonePath.string().c_str(), &opt);
   if (err < 0) {
     std::error_code ec;
     std::filesystem::remove_all(clonePath, ec);
@@ -282,20 +327,17 @@ int PackMan::clone(const char *u) {
     }
     GIT_FAIL;
   } else {
+    repo.repo = raw;
     printf("\n");
   }
 
-// clean:
-  git_repository_free(repo);
   return err;
 }
 
 // git fetch && git checkout FETCH_HEAD -f
-int PackMan::pull(const char *name) {
-  git_repository *repo = NULL;
+int PackMan::pull(git_repository *repo) {
   int err;
   git_remote *remote = NULL;
-  auto path = fmt::format("packages/{}", name);
   git_fetch_options opt;
   git_fetch_init_options(&opt, GIT_FETCH_OPTIONS_VERSION);
   opt.proxy_opts.version = 1;
@@ -303,9 +345,6 @@ int PackMan::pull(const char *name) {
 
   git_checkout_options opt2 = GIT_CHECKOUT_OPTIONS_INIT;
   opt2.checkout_strategy = GIT_CHECKOUT_FORCE;
-
-  err = git_repository_open(&repo, path.c_str());
-  GIT_CHK_CLEAN;
 
   // first git fetch origin
   err = git_remote_lookup(&remote, repo, "origin");
@@ -325,19 +364,14 @@ int PackMan::pull(const char *name) {
 
 clean:
   git_remote_free(remote);
-  git_repository_free(repo);
   return err;
 }
 
-int PackMan::checkout(const char *name, const char *hash) {
-  git_repository *repo = NULL;
+int PackMan::checkout(git_repository *repo, const char *hash) {
   int err;
   git_oid oid = {0};
   git_checkout_options opt = GIT_CHECKOUT_OPTIONS_INIT;
   opt.checkout_strategy = GIT_CHECKOUT_FORCE;
-  auto path = fmt::format("packages/{}", name);
-  err = git_repository_open(&repo, path.c_str());
-  GIT_CHK_CLEAN;
   err = git_oid_fromstr(&oid, hash);
   GIT_CHK_CLEAN;
   err = git_repository_set_head_detached(repo, &oid);
@@ -346,13 +380,11 @@ int PackMan::checkout(const char *name, const char *hash) {
   GIT_CHK_CLEAN;
 
 clean:
-  git_repository_free(repo);
   return err;
 }
 
 // git checkout -B branch origin/branch --force
-int PackMan::checkout_branch(const char *name, const char *branch) {
-  git_repository *repo = NULL;
+int PackMan::checkout_branch(git_repository *repo, const char *branch) {
   git_oid oid = {0};
   int err;
   git_object *obj = NULL;
@@ -364,11 +396,6 @@ int PackMan::checkout_branch(const char *name, const char *branch) {
 
   std::string local_branch;
   std::string remote_branch;
-
-  // 打开仓库
-  auto path = fmt::format("packages/{}", name);
-  err = git_repository_open(&repo, path.c_str());
-  GIT_CHK_CLEAN;
 
   // 查找远程分支的引用 (refs/remotes/origin/branch)
   remote_branch = fmt::format("refs/remotes/origin/{}", branch);
@@ -409,20 +436,15 @@ clean:
   git_reference_free(branch_ref);
   git_reference_free(remote_ref);
   git_object_free(obj);
-  git_repository_free(repo);
 
   return err;
 }
 
-int PackMan::status(const char *name) {
-  git_repository *repo = NULL;
+int PackMan::status(git_repository *repo) {
   int err;
   git_status_list *status_list = NULL;
   size_t i, maxi;
   const git_status_entry *s;
-  auto path = fmt::format("packages/{}", name);
-  err = git_repository_open(&repo, path.c_str());
-  GIT_CHK_CLEAN;
   err = git_status_list_new(&status_list, repo, NULL);
   GIT_CHK_CLEAN;
   maxi = git_status_list_entrycount(status_list);
@@ -431,7 +453,6 @@ int PackMan::status(const char *name) {
     s = git_status_byindex(status_list, i);
     if (s->status != GIT_STATUS_CURRENT && s->status != GIT_STATUS_IGNORED) {
       git_status_list_free(status_list);
-      git_repository_free(repo);
       spdlog::error("Workspace is dirty.");
       return 100;
     }
@@ -439,31 +460,24 @@ int PackMan::status(const char *name) {
 
 clean:
   git_status_list_free(status_list);
-  git_repository_free(repo);
   return err;
 }
 
-std::string PackMan::head(const char *name) {
-  git_repository *repo = NULL;
+std::string PackMan::head(git_repository *repo) {
   int err;
   git_object *obj = NULL;
   const git_oid *oid;
   char buf[42] = {0};
-  auto path = fmt::format("packages/{}", name);
-  err = git_repository_open(&repo, path.c_str());
-  GIT_CHK_CLEAN;
   err = git_revparse_single(&obj, repo, "HEAD");
   GIT_CHK_CLEAN;
 
   oid = git_object_id(obj);
   git_oid_tostr(buf, 41, oid);
   git_object_free(obj);
-  git_repository_free(repo);
   return std::string { buf };
 
 clean:
   git_object_free(obj);
-  git_repository_free(repo);
   return "0000000000000000000000000000000000000000";
 }
 

@@ -4,6 +4,8 @@
 
 #include "c-wrapper.h"
 
+struct git_repository;
+
 class PackMan {
 
 public:
@@ -42,10 +44,13 @@ private:
 
   std::string m_summary;
 
-  int clone(const char *url);
-  int pull(const char *name);
-  int checkout(const char *name, const char *hash);
-  int checkout_branch(const char *name, const char *branch);
-  int status(const char *name); // return 1 if the workdir is modified
-  std::string head(const char *name); // get commit hash of HEAD
+  struct GitRepo;
+
+  int open(const char *name, GitRepo &repo);
+  int clone(const char *url, GitRepo &repo);
+  int pull(git_repository *repo);
+  int checkout(git_repository *repo, const char *hash);
+  int checkout_branch(git_repository *repo, const char *branch);
+  int status(git_repository *repo); // return 1 if the workdir is modified
+  std::string head(git_repository *repo); // get commit hash of HEAD
 };
